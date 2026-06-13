@@ -3,26 +3,113 @@ name: 'Patch SuSFS for Kernel.'
 runs:
   using: 'composite'
   steps:
+      - name: Get SuSFS
+        if: env.SUSFS_ENABLE == 'true'
+        shell: bash
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel/
+
+          # Core
+          if [[ "${{ env.SUSFS_FIXED }}" == true ]]; then
+            if [ -z "${{ env.PATCHES_SOURCE }}" ] || [ -z "${{ env.PATCHES_BRANCH }}" ]; then
+              echo "[-] Please input a vaild source and branch!"
+              false
+            elif [[ "${{ env.PATCHES_SOURCE }}" == *".git" ]]; then
+              echo "[-] Please do not set a full URL in PATCH_SOURCE!"
+              false
+            else
+              git clone https://github.com/${{ env.PATCHES_SOURCE }}.git -b ${{ env.PATCHES_BRANCH }} NonGKI_Kernel_Patches --depth=1 # It's not necessary.
+            fi
+          fi
+
+      - name: Set KSU and SUSFS for DEFCONFIG
+        if: env.SUSFS_ENABLE == 'true'
+        shell: bash
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+
+          echo "CONFIG_KSU_SUSFS=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+
+          if grep -q "THREAD_INFO_IN_TASK" "drivers/kernelsu/Kconfig"; then
+            echo "CONFIG_THREAD_INFO_IN_TASK=y" >> ./arch/${{ env.KERNEL_ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          fi
+
       - name: Patch SuSFS
         if: env.SUSFS_ENABLE == 'true'
         shell: bash
         run: |
           cd $GITHUB_WORKSPACE/device_kernel/
-          cp susfs4ksu/kernel_patches/50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch ./
 
-          patch -p1 < 50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch || true
+          PACK_FILES(){
+            temp_dir=$(mktemp -d)
+            find . -name "*.rej" -exec cp --parents {} "$temp_dir" \;
+            find . -name "*.rej" | sed 's/\.rej$//' | xargs -I {} test -f {} && find . -name "*.rej" | sed 's/\.rej$//' | xargs -I {} cp --parents {} "$temp_dir"
+            tar -czf "rej_files_1.5.5.tar.gz" -C "$temp_dir" .
+            rm -rf "$temp_dir"
+            echo "[+] Packed Successfully."
+
+            find . -type f \( -name "*.rej" -o -name "*.orig" \) -delete
+            echo "[+] Removed all .rej and .orig files."
+            echo "[+] =================================== "
+          }
+
+          # Check SuSFS
+          if grep -q "CONFIG_KSU_SUSFS" "fs/namespace.c"; then
+            echo "[-] SuSFS is already patched, Skipped."
+            echo "SUSFS_SKIP=true" >> $GITHUB_ENV
+          else
+            cp /tmp/Patches/Patch/susfs_patch_to_${{ env.KERNEL_VERSION }}.patch ./
+
+            patch -p1 < susfs_patch_to_${{ env.KERNEL_VERSION }}.patch || true
+            echo "[+] SuSFS Patch completed."
+          fi
+
+          # Patch .rej find
+          if [[ "${{ env.BUILD_DEBUGGER }}" == "true" ]]; then
+            echo "[+] Checking SuSFS v2.0.00 rej files..."
+            mapfile -t REJ_FILES < <(find . -type f -name "*.rej")
+            if [ ${#REJ_FILES[@]} -eq 0 ]; then
+                echo "[+] Your kernel have no any rej files, Skipped."
+            else
+                for CAT_REJ in "${REJ_FILES[@]}"; do
+                    echo "[-] Found .rej file: $CAT_REJ"
+                    cat $CAT_REJ
+                    echo "[+] =================================== "
+                done
+            fi
+
+            if [[ "${{ env.SKIP_PATCH }}" == "true" ]] || [ -n "${{ env.SUSFS_PATCH_FIXED }}" ]; then
+                echo "[+] SuSFS Patch Version: v2.1.00. "
+                echo "[+] SKIP_PATCH enabled or found SuSFS v2.1.00 Fixed Patch, skipping."
+                PACK_FILES
+            elif [[ "${{ env.SKIP_PATCH }}" != "true" ]] || [ -z "${{ env.SUSFS_PATCH_FIXED }}" ]; then
+                echo "[+] SuSFS Patch Version: v2.1.00. "
+                echo "[-] Found .rej files, Stopped! "
+                PACK_FILES
+                false
+            fi
+          fi
 
       - name: SUSFS Patch Fixed
-        if: env.SUSFS_ENABLE == 'true'
+        if: env.SUSFS_ENABLE == 'true' && env.SUSFS_SKIP != 'true'
         shell: bash
         run: |
           cd $GITHUB_WORKSPACE/device_kernel/
 
-          if [[ -z "${{ env.SUSFS_155_FIXED }}" ]]; then
-            echo "Your doesn't powered any patch file."
+          if [[ -z "${{ env.SUSFS_PATCH_FIXED }}" ]]; then
+            echo "[-] You didn't provide any patch file."
           else
-            IFS=',' read -ra FIXED_LIST <<< "${{ env.SUSFS_155_FIXED }}"
-            echo "<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>"
+            IFS=',' read -ra FIXED_LIST <<< "${{ env.SUSFS_PATCH_FIXED }}"
+            echo "[+] =================================== "
             for i in "${!FIXED_LIST[@]}"; do
               echo "Patching -> ${FIXED_LIST[$i]}"
               if [[ -z "${{ env.SUSFS_FOLDER_FIXED }}" ]]; then
@@ -31,75 +118,15 @@ runs:
                 cp NonGKI_Kernel_Patches/"${{ env.SUSFS_FOLDER_FIXED }}"/${FIXED_LIST[$i]}.patch ./
               fi
               patch -p1 < ${FIXED_LIST[$i]}.patch || true
-              echo "Patch fine!"
-              echo "<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>"
+              echo "[+] Patching successful!"
+              echo "[+] =================================== "
             done
           fi
 
-      - name: Updated SUSFS Version
-        if: env.SUSFS_ENABLE == 'true' && env.SUSFS_UPDATE == 'true'
-        shell: bash
-        run: |
-          cd $GITHUB_WORKSPACE/device_kernel/
-
-          # Upgrade 1.5.7
-          cp /tmp/Patches/Patch/susfs_upgrade_to_157.patch ./
-
-          patch -p1 < susfs_upgrade_to_157.patch || true
-
-          # Upgrade 1.5.8
-          if grep -q "CONFIG_KSU" "fs/exec.c"; then
-            cp /tmp/Patches/Patch/susfs_upgrade_to_158_${{ env.KERNEL_VERSION }}.patch ./
-            patch -p1 < susfs_upgrade_to_158_${{ env.KERNEL_VERSION }}.patch || true
-            echo "Detected no-kprobe hook, use no-kprobe patch."
-          elif [[ "${{ env.KERNEL_VERSION }}" == "5.4" ]]; then
-            cp /tmp/Patches/Patch/susfs_upgrade_to_158_5.4_kprobe.patch ./
-            patch -p1 < susfs_upgrade_to_158_5.4_kprobe.patch || true
-            echo "Cannot detected no-kprobe hook in kernel 5.4, use kprobe patch."
-          else
-            echo "kernel version<5.4 cannot use kprobe patch."
-          fi
-          ## Fixed ZYGOTE_ISO error
-          sed -i '/#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS 0x55561/a \#define CMD_SUSFS_UMOUNT_FOR_ZYGOTE_ISO_SERVICE 0x55562' include/linux/susfs_def.h
-
-          # Upgrade 1.5.9
-          cp /tmp/Patches/Patch/susfs_upgrade_to_159.patch ./
-
-          patch -p1 < susfs_upgrade_to_159.patch || true
-
-          # Upgrade 1.5.10
-          if grep -q "CONFIG_KSU" "fs/exec.c"; then
-            cp /tmp/Patches/Patch/susfs_upgrade_to_1510_${{ env.KERNEL_VERSION }}.patch ./
-            patch -p1 < susfs_upgrade_to_1510_${{ env.KERNEL_VERSION }}.patch || true
-            echo "Detected no-kprobe hook, use no-kprobe patch to update 1.5.10."
-          elif [[ "${{ env.KERNEL_VERSION }}" == "5.4" ]]; then
-            cp /tmp/Patches/Patch/susfs_upgrade_to_1510_5.4_kprobe.patch ./
-            patch -p1 < susfs_upgrade_to_1510_5.4_kprobe.patch || true
-            echo "Cannot detected no-kprobe hook in kernel 5.4, use kprobe patch to update 1.5.10."
-          else
-            echo "kernel version<5.4 cannot use kprobe patch to update 1.5.10."
-          fi
-
-      - name: Updated SUSFS Patch Fixed
-        if: env.SUSFS_ENABLE == 'true' && env.SUSFS_UPDATE == 'true'
-        shell: bash
-        run: |
-          cd $GITHUB_WORKSPACE/device_kernel/
-
-          if [[ -z "${{ env.SUSFS_LATEST_FIXED }}" ]]; then
-            echo "Your doesn't powered any patch file."
-          else
-            IFS=',' read -ra FIXED_LIST <<< "${{ env.SUSFS_LATEST_FIXED }}"
-            echo "<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>"
-            for i in "${!FIXED_LIST[@]}"; do
-              echo "Patching -> ${FIXED_LIST[$i]}"
-              if [[ -z "${{ env.SUSFS_FOLDER_FIXED }}" ]]; then
-                cp NonGKI_Kernel_Patches/${FIXED_LIST[$i]}.patch ./
-              else
-                cp NonGKI_Kernel_Patches/"${{ env.SUSFS_FOLDER_FIXED }}"/${FIXED_LIST[$i]}.patch ./
-              fi
-              patch -p1 < ${FIXED_LIST[$i]}.patch || true
-              echo "Patch fine!"
-              echo "<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>>>>>>"
-            done
-          fi
+      - name: Upload Build Patch Rejected Files
+        if: env.BUILD_DEBUGGER == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch_rejected_files
+          path: |
+            device_kernel/rej_files_*
